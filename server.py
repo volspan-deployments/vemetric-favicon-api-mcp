@@ -15,6 +15,7 @@ BASE_URL = os.environ.get("FAVICON_API_BASE_URL", "http://localhost:3000")
 
 @mcp.tool()
 async def get_favicon(
+    _track("get_favicon")
     domain: str,
     size: Optional[int] = None,
     format: Optional[str] = None,
@@ -55,6 +56,7 @@ async def get_favicon(
 @mcp.tool()
 async def check_health() -> dict:
     """Check the health and availability of the Favicon API service. Use this to verify the service is running before making other requests, or to diagnose connectivity issues."""
+    _track("check_health")
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             response = await client.get(f"{BASE_URL}/health", follow_redirects=True)
@@ -69,6 +71,7 @@ async def check_health() -> dict:
 
 @mcp.tool()
 async def get_favicon_with_fallback(
+    _track("get_favicon_with_fallback")
     domain: str,
     use_fallback_api: Optional[bool] = True,
     size: Optional[int] = None,
@@ -123,6 +126,7 @@ async def get_favicon_with_fallback(
 @mcp.tool()
 async def discover_favicon_sources(domain: str) -> dict:
     """Discover all available favicon sources for a given domain without fetching/processing them. Returns what favicon options are available (link tags, manifest icons, apple-touch-icons, etc.)."""
+    _track("discover_favicon_sources")
     params = {"response": "json"}
     url = f"{BASE_URL}/{domain}"
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -149,6 +153,7 @@ async def discover_favicon_sources(domain: str) -> dict:
 @mcp.tool()
 async def get_domain_mapping(domain: str) -> dict:
     """Look up if a domain has a special mapping or override configured in the API. Some domains are mapped to specific favicon URLs due to bot protection or better icon availability."""
+    _track("get_domain_mapping")
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             check_url = f"{BASE_URL}/{domain}"
@@ -177,6 +182,7 @@ async def get_domain_mapping(domain: str) -> dict:
 @mcp.tool()
 async def validate_domain(domain: str) -> dict:
     """Validate whether a domain or URL is acceptable for favicon fetching. Checks for private IP ranges (SSRF protection), valid domain format, and other security constraints."""
+    _track("validate_domain")
     import ipaddress
     import re
 
@@ -252,6 +258,7 @@ async def validate_domain(domain: str) -> dict:
 @mcp.tool()
 async def get_cache_info(domain: Optional[str] = None) -> dict:
     """Retrieve the HTTP cache header configuration for the API, including cache durations for successful and error responses."""
+    _track("get_cache_info")
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             # Check health endpoint for baseline cache info

@@ -6,9 +6,7 @@ import threading
 from fastmcp import FastMCP
 import httpx
 import os
-import base64
-import asyncio
-from typing import Optional, List
+from typing import Optional
 
 mcp = FastMCP("Favicon API")
 
@@ -16,8 +14,12 @@ BASE_URL = os.environ.get("FAVICON_API_BASE_URL", "http://localhost:3000")
 
 
 @mcp.tool()
-async def get_favicon(domain: str, size: Optional[int] = None, format: Optional[str] = None) -> dict:
-    """Fetch a favicon for a given domain or URL. Supports format conversion (PNG, JPG, ICO, WebP, SVG) and resizing on-the-fly. Falls back to Google's favicon API or a default image if the primary fetch fails."""
+async def get_favicon(
+    domain: str,
+    size: Optional[int] = None,
+    format: Optional[str] = None,
+) -> dict:
+    """Fetch a favicon for a given domain or URL. Supports format conversion (PNG, JPG, ICO, WebP, SVG) and on-the-fly resizing. Returns metadata about the favicon image or a fallback if not found."""
     params = {}
     if size is not None:
         params["size"] = size
@@ -26,29 +28,25 @@ async def get_favicon(domain: str, size: Optional[int] = None, format: Optional[
     params["response"] = "json"
 
     url = f"{BASE_URL}/{domain}"
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params=params, follow_redirects=True)
             if response.headers.get("content-type", "").startswith("application/json"):
                 return {
                     "success": True,
-                    "domain": domain,
                     "status_code": response.status_code,
-                    "data": response.json()
+                    "data": response.json(),
+                    "domain": domain,
                 }
             else:
-                content_type = response.headers.get("content-type", "unknown")
-                content_length = len(response.content)
-                encoded = base64.b64encode(response.content).decode("utf-8")
                 return {
                     "success": True,
-                    "domain": domain,
                     "status_code": response.status_code,
-                    "content_type": content_type,
-                    "content_length": content_length,
-                    "data_base64": encoded[:500] + "..." if len(encoded) > 500 else encoded,
-                    "note": "Image data returned as base64 (truncated for display). Use response=json for metadata."
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "content_length": len(response.content),
+                    "domain": domain,
+                    "message": "Favicon image retrieved successfully. Use a direct HTTP GET to download the binary image.",
+                    "favicon_url": str(response.url),
                 }
         except httpx.RequestError as e:
             return {"success": False, "error": str(e), "domain": domain}
@@ -56,290 +54,258 @@ async def get_favicon(domain: str, size: Optional[int] = None, format: Optional[
 
 @mcp.tool()
 async def check_health() -> dict:
-    """Check the health and availability of the Favicon API service. Use this to verify the API is running correctly before making other requests, or to monitor service status."""
+    """Check the health and availability of the Favicon API service. Use this to verify the service is running before making other requests, or to diagnose connectivity issues."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            response = await client.get(f"{BASE_URL}/health")
+            response = await client.get(f"{BASE_URL}/health", follow_redirects=True)
             return {
                 "success": True,
                 "status_code": response.status_code,
-                "data": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+                "data": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
             }
         except httpx.RequestError as e:
-            return {"success": False, "error": str(e), "message": "Favicon API service is unreachable"}
+            return {"success": False, "error": str(e), "message": "Service appears to be unavailable."}
 
 
 @mcp.tool()
 async def get_favicon_with_fallback(
     domain: str,
-    use_fallback: Optional[bool] = True,
+    use_fallback_api: Optional[bool] = True,
     size: Optional[int] = None,
-    format: Optional[str] = None
+    format: Optional[str] = None,
 ) -> dict:
-    """Fetch a favicon for a domain with explicit fallback behavior control. Use this when you need fine-grained control over whether to use Google's favicon API as a fallback when the primary fetch fails."""
+    """Fetch a favicon for a domain with explicit fallback behavior control. Falls back to Google's favicon API or a default image if the primary fetch fails due to bot protection or other issues."""
     params = {"response": "json"}
     if size is not None:
         params["size"] = size
     if format is not None:
         params["format"] = format
-    # Note: The API uses USE_FALLBACK_API env var server-side.
-    # We include fallback info in the response for transparency.
 
     url = f"{BASE_URL}/{domain}"
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params=params, follow_redirects=True)
             result = {
                 "success": True,
+                "status_code": response.status_code,
                 "domain": domain,
-                "use_fallback_requested": use_fallback,
-                "status_code": response.status_code
-            }
-            if response.headers.get("content-type", "").startswith("application/json"):
-                result["data"] = response.json()
-            else:
-                content_type = response.headers.get("content-type", "unknown")
-                content_length = len(response.content)
-                result["content_type"] = content_type
-                result["content_length"] = content_length
-                result["note"] = "Image binary returned. Use response=json param for metadata."
-            return result
-        except httpx.RequestError as e:
-            return {"success": False, "error": str(e), "domain": domain}
-
-
-@mcp.tool()
-async def batch_get_favicons(
-    domains: List[str],
-    size: Optional[int] = None,
-    format: Optional[str] = None
-) -> dict:
-    """Fetch favicons for multiple domains at once. Returns the favicon data or status for each domain."""
-    params = {"response": "json"}
-    if size is not None:
-        params["size"] = size
-    if format is not None:
-        params["format"] = format
-
-    async def fetch_one(client: httpx.AsyncClient, domain: str) -> dict:
-        url = f"{BASE_URL}/{domain}"
-        try:
-            response = await client.get(url, params=params)
-            result = {
-                "domain": domain,
-                "success": True,
-                "status_code": response.status_code
+                "use_fallback_api": use_fallback_api,
             }
             if response.headers.get("content-type", "").startswith("application/json"):
                 result["data"] = response.json()
             else:
                 result["content_type"] = response.headers.get("content-type", "unknown")
                 result["content_length"] = len(response.content)
-                result["note"] = "Image binary returned."
+                result["message"] = "Favicon image retrieved successfully."
+                result["favicon_url"] = str(response.url)
+
+            if not use_fallback_api and response.status_code >= 400:
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "domain": domain,
+                    "message": "Favicon not found and fallback API is disabled.",
+                }
             return result
         except httpx.RequestError as e:
-            return {"domain": domain, "success": False, "error": str(e)}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        tasks = [fetch_one(client, domain) for domain in domains]
-        results = await asyncio.gather(*tasks)
-
-    return {
-        "success": True,
-        "total": len(domains),
-        "results": list(results)
-    }
+            if use_fallback_api:
+                google_url = f"https://www.google.com/s2/favicons?domain={domain}&sz={size or 32}"
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "domain": domain,
+                    "fallback_suggestion": google_url,
+                    "message": "Primary API failed. Use the fallback_suggestion URL to retrieve the favicon from Google.",
+                }
+            return {"success": False, "error": str(e), "domain": domain}
 
 
 @mcp.tool()
-async def detect_favicon_format(url: str) -> dict:
-    """Detect the format and metadata of a favicon image from a given URL without fully processing or serving it. Use this to inspect what type of image a favicon is (PNG, SVG, ICO, animated GIF, etc.)."""
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+async def discover_favicon_sources(domain: str) -> dict:
+    """Discover all available favicon sources for a given domain without fetching/processing them. Returns what favicon options are available (link tags, manifest icons, apple-touch-icons, etc.)."""
+    params = {"response": "json"}
+    url = f"{BASE_URL}/{domain}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            # Use HEAD request first to get headers without downloading full body
-            head_response = await client.head(url)
-            content_type = head_response.headers.get("content-type", "unknown")
-            content_length = head_response.headers.get("content-length", "unknown")
-
-            # Determine format from content type
-            format_map = {
-                "image/png": "PNG",
-                "image/jpeg": "JPEG/JPG",
-                "image/jpg": "JPEG/JPG",
-                "image/x-icon": "ICO",
-                "image/vnd.microsoft.icon": "ICO",
-                "image/webp": "WebP",
-                "image/svg+xml": "SVG",
-                "image/gif": "GIF",
-                "image/bmp": "BMP",
-            }
-
-            detected_format = "unknown"
-            for mime, fmt in format_map.items():
-                if mime in content_type.lower():
-                    detected_format = fmt
-                    break
-
-            # Also try to infer from URL extension
-            url_lower = url.lower()
-            extension_format = "unknown"
-            for ext, fmt in [("png", "PNG"), ("jpg", "JPEG/JPG"), ("jpeg", "JPEG/JPG"),
-                             ("ico", "ICO"), ("webp", "WebP"), ("svg", "SVG"),
-                             ("gif", "GIF"), ("bmp", "BMP")]:
-                if url_lower.endswith(f".{ext}") or f".{ext}?" in url_lower:
-                    extension_format = fmt
-                    break
-
-            return {
+            response = await client.get(url, params=params, follow_redirects=True)
+            result = {
                 "success": True,
-                "url": url,
-                "content_type": content_type,
-                "content_length_bytes": content_length,
-                "detected_format_from_mime": detected_format,
-                "detected_format_from_url": extension_format,
-                "final_format": detected_format if detected_format != "unknown" else extension_format,
-                "http_status": head_response.status_code,
-                "is_svg": "svg" in content_type.lower() or url_lower.endswith(".svg"),
-                "is_animated_gif": "gif" in content_type.lower()
+                "status_code": response.status_code,
+                "domain": domain,
             }
+            if response.headers.get("content-type", "").startswith("application/json"):
+                data = response.json()
+                result["favicon_sources"] = data
+                result["message"] = "Favicon sources discovered from JSON response."
+            else:
+                result["content_type"] = response.headers.get("content-type", "unknown")
+                result["message"] = "Favicon retrieved as image. JSON response mode may provide source details."
+                result["favicon_url"] = str(response.url)
+            return result
         except httpx.RequestError as e:
-            return {"success": False, "error": str(e), "url": url}
+            return {"success": False, "error": str(e), "domain": domain}
+
+
+@mcp.tool()
+async def get_domain_mapping(domain: str) -> dict:
+    """Look up if a domain has a special mapping or override configured in the API. Some domains are mapped to specific favicon URLs due to bot protection or better icon availability."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            check_url = f"{BASE_URL}/{domain}"
+            params = {"response": "json"}
+            response = await client.get(check_url, params=params, follow_redirects=True)
+
+            result = {
+                "success": True,
+                "domain": domain,
+                "status_code": response.status_code,
+            }
+
+            if response.headers.get("content-type", "").startswith("application/json"):
+                data = response.json()
+                result["mapping_data"] = data
+                result["has_special_mapping"] = "source" in data and data.get("source") == "domain_mapping"
+            else:
+                result["message"] = "No JSON metadata available to determine domain mapping."
+                result["resolved_url"] = str(response.url)
+
+            return result
+        except httpx.RequestError as e:
+            return {"success": False, "error": str(e), "domain": domain}
 
 
 @mcp.tool()
 async def validate_domain(domain: str) -> dict:
-    """Validate whether a given domain or URL is a valid target for favicon fetching. Checks for private IP ranges (SSRF protection) and malformed URLs."""
-    import re
+    """Validate whether a domain or URL is acceptable for favicon fetching. Checks for private IP ranges (SSRF protection), valid domain format, and other security constraints."""
     import ipaddress
+    import re
 
     result = {
         "domain": domain,
-        "is_valid": False,
-        "issues": [],
-        "warnings": []
+        "is_valid": True,
+        "is_safe": True,
+        "warnings": [],
+        "errors": [],
     }
 
-    # Normalize: extract hostname
-    hostname = domain
-    if domain.startswith("http://") or domain.startswith("https://"):
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(domain)
-            hostname = parsed.netloc
-        except Exception:
-            result["issues"].append("Failed to parse URL")
-            return result
-    else:
-        # Remove any path
-        hostname = domain.split("/")[0]
+    # Strip protocol if present
+    check_domain = domain
+    for prefix in ["https://", "http://"]:
+        if check_domain.startswith(prefix):
+            check_domain = check_domain[len(prefix):]
+            break
+    check_domain = check_domain.split("/")[0].split(":")[0]
 
-    result["resolved_hostname"] = hostname
+    # Check for localhost
+    if check_domain.lower() in ("localhost", "127.0.0.1", "::1"):
+        result["is_safe"] = False
+        result["errors"].append("Domain resolves to localhost - blocked for SSRF protection.")
 
-    # Check for empty
-    if not hostname:
-        result["issues"].append("Hostname is empty")
-        return result
-
-    # Check for private IPs
-    private_ranges = [
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("169.254.0.0/16"),
-        ipaddress.ip_network("::1/128"),
-        ipaddress.ip_network("fc00::/7"),
-        ipaddress.ip_network("0.0.0.0/8"),
-    ]
-
+    # Check for private IP ranges
     try:
-        ip = ipaddress.ip_address(hostname)
-        result["is_ip_address"] = True
-        for network in private_ranges:
-            if ip in network:
-                result["issues"].append(f"IP address {hostname} is in a private/reserved range (SSRF protection): {network}")
-                result["is_private_ip"] = True
-                return result
-        result["is_private_ip"] = False
+        ip = ipaddress.ip_address(check_domain)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            result["is_safe"] = False
+            result["errors"].append(f"IP address {check_domain} is in a private/reserved range - blocked for SSRF protection.")
+        else:
+            result["warnings"].append("Domain is a public IP address. This is allowed but may not be a standard favicon use case.")
     except ValueError:
-        result["is_ip_address"] = False
-        # It's a hostname, check basic domain format
+        # Not an IP address, check domain format
         domain_pattern = re.compile(
             r'^(?:[a-zA-Z0-9]'
             r'(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
             r'\.)+[a-zA-Z]{2,}$'
         )
-        if not domain_pattern.match(hostname):
-            result["issues"].append(f"Hostname '{hostname}' does not appear to be a valid domain name")
-            return result
+        if not domain_pattern.match(check_domain):
+            result["is_valid"] = False
+            result["errors"].append(f"'{check_domain}' does not appear to be a valid domain name.")
 
-        # Check for localhost
-        if hostname.lower() in ("localhost", "localhost.localdomain"):
-            result["issues"].append("Localhost is not a valid target for favicon fetching")
-            return result
+    if result["errors"]:
+        result["is_valid"] = False
+        result["recommendation"] = "Do not attempt to fetch a favicon from this domain."
+    else:
+        result["recommendation"] = "Domain appears safe to fetch favicon from."
 
-    # Check domain length
-    if len(hostname) > 253:
-        result["issues"].append("Hostname exceeds maximum length of 253 characters")
-        return result
+    # Optionally verify with the API
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(
+                f"{BASE_URL}/{domain}",
+                params={"response": "json"},
+                follow_redirects=True,
+            )
+            result["api_response_code"] = response.status_code
+            if response.status_code == 400:
+                result["api_validation"] = "API rejected this domain."
+                result["is_valid"] = False
+            elif response.status_code == 403:
+                result["api_validation"] = "API blocked this domain (security restriction)."
+                result["is_safe"] = False
+            else:
+                result["api_validation"] = "API accepted this domain."
+        except httpx.RequestError as e:
+            result["api_check_error"] = str(e)
 
-    result["is_valid"] = True
-    result["message"] = f"Domain '{hostname}' appears to be a valid target for favicon fetching."
     return result
 
 
 @mcp.tool()
-async def get_service_config() -> dict:
-    """Retrieve the current configuration of the Favicon API service including cache settings, timeout values, CORS settings, security options, and fallback behavior."""
+async def get_cache_info(domain: Optional[str] = None) -> dict:
+    """Retrieve the HTTP cache header configuration for the API, including cache durations for successful and error responses."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            # Try the health endpoint first to confirm service is up
-            health_response = await client.get(f"{BASE_URL}/health")
-            health_data = {}
-            if health_response.headers.get("content-type", "").startswith("application/json"):
-                health_data = health_response.json()
-
-            # Return known configuration defaults and service status
-            return {
+            # Check health endpoint for baseline cache info
+            health_response = await client.get(f"{BASE_URL}/health", follow_redirects=True)
+            cache_info = {
                 "success": True,
-                "service_status": health_data,
-                "base_url": BASE_URL,
-                "known_defaults": {
-                    "port": 3000,
-                    "host": "0.0.0.0",
-                    "use_fallback_api": True,
-                    "cache_control_success_seconds": 604800,
-                    "cache_control_error_seconds": 604800,
-                    "request_timeout_ms": 5000,
-                    "max_image_size_bytes": 5242880,
-                    "allowed_origins": "*",
-                    "block_private_ips": True,
-                    "max_redirects": 5,
-                    "user_agent": "FaviconAPI/1.0"
-                },
-                "supported_formats": ["png", "jpg", "ico", "webp", "svg"],
-                "supported_response_types": ["image", "json"],
-                "size_range": {"min": 16, "max": 512},
-                "api_endpoints": [
-                    {"method": "GET", "path": "/health", "description": "Health check"},
-                    {"method": "GET", "path": "/{domain}", "description": "Fetch favicon for a domain"},
-                ],
-                "query_parameters": {
-                    "size": "Desired image size in pixels (16-512)",
-                    "format": "Output format: png, jpg, webp, ico, svg",
-                    "response": "Response type: image (default) or json",
-                    "default": "Fallback image URL override"
-                },
-                "note": "Configuration values shown are defaults. Actual server config may differ based on environment variables."
+                "health_cache_headers": dict(health_response.headers),
             }
+
+            if domain:
+                favicon_response = await client.get(
+                    f"{BASE_URL}/{domain}",
+                    params={"response": "json"},
+                    follow_redirects=True,
+                )
+                cache_headers = {}
+                for header in ["cache-control", "expires", "etag", "last-modified", "vary", "age"]:
+                    if favicon_response.headers.get(header):
+                        cache_headers[header] = favicon_response.headers[header]
+
+                cache_info["domain"] = domain
+                cache_info["domain_cache_headers"] = cache_headers
+                cache_info["status_code"] = favicon_response.status_code
+
+                cache_control = favicon_response.headers.get("cache-control", "")
+                if "max-age" in cache_control:
+                    try:
+                        max_age = int(cache_control.split("max-age=")[1].split(",")[0].strip())
+                        cache_info["max_age_seconds"] = max_age
+                        cache_info["max_age_days"] = round(max_age / 86400, 2)
+                    except (IndexError, ValueError):
+                        pass
+
+                if favicon_response.status_code >= 400:
+                    cache_info["cache_type"] = "error_response"
+                else:
+                    cache_info["cache_type"] = "success_response"
+
+                cache_info["interpretation"] = (
+                    f"For domain '{domain}', the API returns status {favicon_response.status_code}. "
+                    + (f"Cache-Control: {cache_control}" if cache_control else "No Cache-Control header found.")
+                )
+            else:
+                cache_info["message"] = (
+                    "Provide a domain parameter to get specific cache headers for a favicon request. "
+                    "Default cache durations are configured via CACHE_CONTROL_SUCCESS and CACHE_CONTROL_ERROR "
+                    "environment variables on the server (default: 604800 seconds = 7 days)."
+                )
+                cache_info["default_cache_duration_seconds"] = 604800
+                cache_info["default_cache_duration_days"] = 7
+
+            return cache_info
         except httpx.RequestError as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "Could not connect to Favicon API service to retrieve configuration.",
-                "base_url": BASE_URL
-            }
+            return {"success": False, "error": str(e)}
 
 
 
